@@ -1,40 +1,52 @@
-self.onmessage = (event: MessageEvent) => {
-  const message = event.data;
+let samples: Int32Array;
+let seqs: Int32Array;
+let hist = 120000;
+let nch = 27;
 
-  if (message.type === "benchmark-copy") {
-    const payload = message.payload as Float32Array;
-    postMessage({ type: "benchmark-copy-done", length: payload.length, t0: message.t0 });
+function leer(ch: number, idx: number) {
+  const slot = idx % hist;
+  const off = ch * hist + slot;
+  const a = Atomics.load(seqs, off);
+  if (a !== idx) return 0;
+  const v = samples[off];
+  const b = Atomics.load(seqs, off);
+  if (a !== b) return 0;
+  return v;
+}
+
+self.onmessage = function (e: MessageEvent) {
+  const m = e.data;
+  if (m.type === "init") {
+    samples = new Int32Array(m.samplesSab);
+    seqs = new Int32Array(m.seqSab);
+    hist = m.historySamples;
+    nch = m.nch || 27;
     return;
   }
-
-  if (message.type === "benchmark-transfer") {
-    const payload = message.payload as Float32Array;
-    postMessage({ type: "benchmark-transfer-done", length: payload.length, t0: message.t0 });
+  if (m.type === "benchCopy") {
+    const p = m.payload;
+    postMessage({ type: "benchCopyOk", n: p.length });
     return;
   }
-
-  if (message.type !== "export") return;
-
-  const { startSample, endSample, sampleRate, channels } = message as {
-    startSample: number;
-    endSample: number;
-    sampleRate: number;
-    channels: Array<{ channelId: number; samples: Int32Array }>;
-  };
-
-  const rows: string[] = [];
-  const header = ["sample", "time_s", ...channels.map((c) => `ch_${c.channelId}`)].join(",");
-  rows.push(header);
-
-  const count = Math.max(0, endSample - startSample);
-  for (let i = 0; i < count; i += 1) {
-    const sampleIndex = startSample + i;
-    const row = [sampleIndex.toString(), (sampleIndex / sampleRate).toFixed(3)];
-    for (const channel of channels) {
-      row.push((channel.samples[i] ?? 0).toString());
+  if (m.type === "benchTx") {
+    const p = m.payload;
+    postMessage({ type: "benchTxOk", n: p.length });
+    return;
+  }
+  if (m.type === "csv") {
+    const ini = m.ini;
+    const fin = m.fin;
+    const fs = m.fs;
+    let out = "sample,t_s";
+    for (let c = 0; c < nch; c++) out += ",ch" + c;
+    out += "\n";
+    const n = Math.max(0, fin - ini);
+    for (let i = 0; i < n; i++) {
+      const idx = ini + i;
+      let row = idx + "," + (idx / fs).toFixed(3);
+      for (let c = 0; c < nch; c++) row += "," + leer(c, idx);
+      out += row + "\n";
     }
-    rows.push(row.join(","));
+    postMessage({ type: "csvOk", csv: out, id: m.id });
   }
-
-  postMessage({ type: "export-done", csv: rows.join("\n") });
 };

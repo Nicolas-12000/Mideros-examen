@@ -1,208 +1,204 @@
-type Frame = {
+const STA = 40;
+const LTA = 1000;
+const MAXWIN = 1000;
+const OFF = 2.6;
+
+let hist = 120000;
+let chPorEst = 3;
+let samples: Int32Array;
+let seqs: Int32Array;
+let heads: Int32Array;
+let ratioOn = 3.2;
+let ampMin = 5000;
+
+type St = {
+  nextSeq: number | null;
+  cola: Trama[];
+  seen: number;
+  sta: Float64Array;
+  lta: Float64Array;
+  staI: number;
+  ltaI: number;
+  staN: number;
+  ltaN: number;
+  staSum: number;
+  ltaSum: number;
+  trig: boolean;
+  dq: { i: number; v: number }[];
+};
+
+type Trama = {
   stationId: number;
   channel: number;
   seq: number;
-  t0Us: number;
-  samples: Int32Array;
+  t0: number;
+  samplesArr: Int32Array;
 };
 
-type ChannelState = {
-  expectedSeq: number | null;
-  pending: Frame[];
-  staRing: Float64Array;
-  ltaRing: Float64Array;
-  staPos: number;
-  ltaPos: number;
-  staCount: number;
-  ltaCount: number;
-  staSum: number;
-  ltaSum: number;
-  trigOn: boolean;
-  deque: { idx: number; val: number }[];
-};
+const canales = new Map<number, St>();
+const activos = new Map<number, number>();
 
-const STA_N = 40;
-const LTA_N = 1000;
-const MAX_N = 1000;
-const OFF_RATIO = 2.6;
-
-let historySamples = 120_000;
-let channelsPerStation = 3;
-let samplesView: Int32Array;
-let seqView: Int32Array;
-let writeHeads: Int32Array;
-let assignedStations: number[] = [];
-let ratioOn = 3.2;
-let ampThreshold = 5000;
-
-const states = new Map<number, ChannelState>();
-const stationActiveChannels = new Map<number, number>();
-
-function ensureState(globalChannel: number): ChannelState {
-  const cached = states.get(globalChannel);
-  if (cached) return cached;
-  const created: ChannelState = {
-    expectedSeq: null,
-    pending: [],
-    staRing: new Float64Array(STA_N),
-    ltaRing: new Float64Array(LTA_N),
-    staPos: 0,
-    ltaPos: 0,
-    staCount: 0,
-    ltaCount: 0,
+function stOf(ch: number): St {
+  let s = canales.get(ch);
+  if (s) return s;
+  s = {
+    nextSeq: null,
+    cola: [],
+    seen: -1,
+    sta: new Float64Array(STA),
+    lta: new Float64Array(LTA),
+    staI: 0,
+    ltaI: 0,
+    staN: 0,
+    ltaN: 0,
     staSum: 0,
     ltaSum: 0,
-    trigOn: false,
-    deque: [],
+    trig: false,
+    dq: [],
   };
-  states.set(globalChannel, created);
-  return created;
+  canales.set(ch, s);
+  return s;
 }
 
-function pushOrdered(list: Frame[], frame: Frame) {
-  let i = list.length;
-  while (i > 0 && (list[i - 1].t0Us > frame.t0Us || (list[i - 1].t0Us === frame.t0Us && list[i - 1].seq > frame.seq))) {
-    i -= 1;
-  }
-  list.splice(i, 0, frame);
+function parsear(buf: ArrayBuffer): Trama {
+  const v = new DataView(buf);
+  const samplesArr = new Int32Array(50);
+  for (let i = 0; i < 50; i++) samplesArr[i] = v.getInt32(16 + i * 4, true);
+  return {
+    stationId: v.getUint16(0, true),
+    channel: v.getUint8(2),
+    seq: v.getUint32(4, true),
+    t0: v.getFloat64(8, true),
+    samplesArr,
+  };
 }
 
-function updateTrigger(stationId: number, channelState: ChannelState, on: boolean, tsUs: number, sampleIndex: number) {
-  if (channelState.trigOn === on) return;
-  channelState.trigOn = on;
-  const current = stationActiveChannels.get(stationId) ?? 0;
+function setTrig(est: number, s: St, on: boolean, tUs: number, idx: number) {
+  if (s.trig === on) return;
+  s.trig = on;
+  const n = activos.get(est) || 0;
   if (on) {
-    const next = current + 1;
-    stationActiveChannels.set(stationId, next);
-    if (current === 0) {
-      postMessage({ type: "trigger-start", stationId, tsUs, sampleIndex });
-    }
+    activos.set(est, n + 1);
+    if (n === 0) postMessage({ type: "trigOn", stationId: est, tsUs: tUs, sampleIndex: idx });
   } else {
-    const next = Math.max(0, current - 1);
-    stationActiveChannels.set(stationId, next);
-    if (current > 0 && next === 0) {
-      postMessage({ type: "trigger-end", stationId, tsUs, sampleIndex });
-    }
+    activos.set(est, Math.max(0, n - 1));
+    if (n === 1) postMessage({ type: "trigOff", stationId: est, tsUs: tUs, sampleIndex: idx });
   }
 }
 
-function processSample(globalChannel: number, stationId: number, value: number, sampleTimeUs: number) {
-  const channelState = ensureState(globalChannel);
-  const abs = Math.abs(value);
+function muestra(ch: number, est: number, val: number, tUs: number) {
+  const s = stOf(ch);
+  const abs = Math.abs(val);
 
-  const idx = Atomics.add(writeHeads, globalChannel, 1);
-  const slot = idx % historySamples;
-  const offset = globalChannel * historySamples + slot;
+  const idx = Atomics.add(heads, ch, 1);
+  const slot = idx % hist;
+  const off = ch * hist + slot;
 
-  Atomics.store(seqView, offset, -idx - 1);
-  samplesView[offset] = value;
-  Atomics.store(seqView, offset, idx);
+  Atomics.store(seqs, off, -idx - 1);
+  samples[off] = val;
+  Atomics.store(seqs, off, idx);
 
-  channelState.staSum -= channelState.staRing[channelState.staPos];
-  channelState.staRing[channelState.staPos] = abs;
-  channelState.staSum += abs;
-  channelState.staPos = (channelState.staPos + 1) % STA_N;
-  if (channelState.staCount < STA_N) channelState.staCount += 1;
+  s.staSum -= s.sta[s.staI];
+  s.sta[s.staI] = abs;
+  s.staSum += abs;
+  s.staI = (s.staI + 1) % STA;
+  if (s.staN < STA) s.staN++;
 
-  channelState.ltaSum -= channelState.ltaRing[channelState.ltaPos];
-  channelState.ltaRing[channelState.ltaPos] = abs;
-  channelState.ltaSum += abs;
-  channelState.ltaPos = (channelState.ltaPos + 1) % LTA_N;
-  if (channelState.ltaCount < LTA_N) channelState.ltaCount += 1;
-
-  while (channelState.deque.length > 0 && channelState.deque[channelState.deque.length - 1].val <= abs) {
-    channelState.deque.pop();
-  }
-  channelState.deque.push({ idx, val: abs });
-  while (channelState.deque.length > 0 && channelState.deque[0].idx <= idx - MAX_N) {
-    channelState.deque.shift();
+  if (!s.trig) {
+    s.ltaSum -= s.lta[s.ltaI];
+    s.lta[s.ltaI] = abs;
+    s.ltaSum += abs;
+    s.ltaI = (s.ltaI + 1) % LTA;
+    if (s.ltaN < LTA) s.ltaN++;
   }
 
-  const staMean = channelState.staCount === 0 ? 0 : channelState.staSum / channelState.staCount;
-  const ltaMean = channelState.ltaCount === 0 ? 1 : channelState.ltaSum / channelState.ltaCount;
-  const ratio = staMean / Math.max(ltaMean, 1e-6);
-
-  if (!channelState.trigOn && ratio >= ratioOn && abs >= ampThreshold) {
-    updateTrigger(stationId, channelState, true, sampleTimeUs, idx);
-  } else if (channelState.trigOn && (ratio < OFF_RATIO || abs < ampThreshold * 0.8)) {
-    updateTrigger(stationId, channelState, false, sampleTimeUs, idx);
+  if (idx % 8000 === 0) {
+    let a = 0;
+    for (let i = 0; i < STA; i++) a += s.sta[i];
+    s.staSum = a;
+    if (!s.trig) {
+      let b = 0;
+      for (let i = 0; i < LTA; i++) b += s.lta[i];
+      s.ltaSum = b;
+    }
   }
+
+  while (s.dq.length && s.dq[s.dq.length - 1].v <= abs) s.dq.pop();
+  s.dq.push({ i: idx, v: abs });
+  while (s.dq.length && s.dq[0].i <= idx - MAXWIN) s.dq.shift();
+
+  const staM = s.staN ? s.staSum / s.staN : 0;
+  const ltaM = s.ltaN ? s.ltaSum / s.ltaN : 1;
+  const r = staM / Math.max(ltaM, 1e-6);
+
+  if (!s.trig && r >= ratioOn && abs >= ampMin) setTrig(est, s, true, tUs, idx);
+  else if (s.trig && (r < OFF || abs < ampMin * 0.8)) setTrig(est, s, false, tUs, idx);
 
   if ((idx & 63) === 0) {
     postMessage({
-      type: "channel-peak",
-      channel: globalChannel,
-      peak: channelState.deque.length === 0 ? abs : channelState.deque[0].val,
+      type: "pico",
+      channel: ch,
+      peak: s.dq.length ? s.dq[0].v : abs,
       sampleIndex: idx,
     });
   }
 }
 
-function processFrame(frame: Frame) {
-  const globalChannel = (frame.stationId - 1) * channelsPerStation + frame.channel;
-  const state = ensureState(globalChannel);
+function procesar(trama: Trama) {
+  const ch = (trama.stationId - 1) * chPorEst + trama.channel;
+  const s = stOf(ch);
 
-  pushOrdered(state.pending, frame);
-  if (state.expectedSeq === null && state.pending.length > 0) {
-    state.expectedSeq = state.pending[0].seq;
+  s.cola.push(trama);
+  s.cola.sort(function (a, b) {
+    if (a.t0 === b.t0) return a.seq - b.seq;
+    return a.t0 - b.t0;
+  });
+
+  if (s.nextSeq === null && s.cola.length) s.nextSeq = s.cola[0].seq;
+
+  if (s.cola.length > 40) {
+    s.cola = s.cola.slice(-20);
+    s.nextSeq = s.cola[0].seq;
   }
 
-  while (state.pending.length > 0) {
-    const next = state.pending[0];
-    if (state.expectedSeq !== null && next.seq !== state.expectedSeq) break;
-    state.pending.shift();
-
-    for (let i = 0; i < next.samples.length; i += 1) {
-      const ts = next.t0Us + i * 5000;
-      processSample(globalChannel, next.stationId, next.samples[i], ts);
+  while (s.cola.length) {
+    const n = s.cola[0];
+    if (s.nextSeq != null && n.seq < s.nextSeq) {
+      s.cola.shift();
+      continue;
     }
-    if (state.expectedSeq !== null) state.expectedSeq += 1;
-  }
-
-  if (state.pending.length > 128) {
-    state.pending.splice(0, state.pending.length - 32);
-    state.expectedSeq = state.pending[0]?.seq ?? state.expectedSeq;
+    if (s.nextSeq != null && n.seq !== s.nextSeq) {
+      if (s.cola.length < 8) break;
+      s.nextSeq = n.seq;
+    }
+    s.cola.shift();
+    if (n.seq === s.seen) continue;
+    s.seen = n.seq;
+    for (let i = 0; i < n.samplesArr.length; i++) {
+      muestra(ch, n.stationId, n.samplesArr[i], n.t0 + i * 5000);
+    }
+    s.nextSeq = n.seq + 1;
   }
 }
 
-function parseFrame(buffer: ArrayBuffer): Frame {
-  const view = new DataView(buffer);
-  const stationId = view.getUint16(0, true);
-  const channel = view.getUint8(2);
-  const seq = view.getUint32(4, true);
-  const t0Us = view.getFloat64(8, true);
-  const samples = new Int32Array(50);
-  for (let i = 0; i < 50; i += 1) {
-    samples[i] = view.getInt32(16 + i * 4, true);
-  }
-  return { stationId, channel, seq, t0Us, samples };
-}
-
-self.onmessage = (event: MessageEvent) => {
-  const message = event.data;
-  if (message.type === "init") {
-    historySamples = message.historySamples;
-    channelsPerStation = message.channelsPerStation;
-    assignedStations = message.stations as number[];
-    ratioOn = message.ratioOn ?? ratioOn;
-    ampThreshold = message.ampThreshold ?? ampThreshold;
-    samplesView = new Int32Array(message.samplesSab);
-    seqView = new Int32Array(message.seqSab);
-    writeHeads = new Int32Array(message.writeHeadsSab);
-    for (const stationId of assignedStations) {
-      stationActiveChannels.set(stationId, 0);
-    }
-    postMessage({ type: "ready" });
+self.onmessage = function (e: MessageEvent) {
+  const m = e.data;
+  if (m.type === "init") {
+    hist = m.historySamples;
+    chPorEst = m.channelsPerStation;
+    if (m.ratioOn != null) ratioOn = m.ratioOn;
+    if (m.ampThreshold != null) ampMin = m.ampThreshold;
+    samples = new Int32Array(m.samplesSab);
+    seqs = new Int32Array(m.seqSab);
+    heads = new Int32Array(m.headsSab);
+    for (let i = 0; i < (m.stations || []).length; i++) activos.set(m.stations[i], 0);
+    postMessage({ type: "ok" });
     return;
   }
-
-  if (message.type === "control") {
-    ratioOn = message.ratioOn ?? ratioOn;
-    ampThreshold = message.ampThreshold ?? ampThreshold;
+  if (m.type === "ctrl") {
+    if (m.ratioOn != null) ratioOn = m.ratioOn;
+    if (m.ampThreshold != null) ampMin = m.ampThreshold;
     return;
   }
-
-  if (message.type === "frame") {
-    processFrame(parseFrame(message.buffer as ArrayBuffer));
-  }
+  if (m.type === "frame") procesar(parsear(m.buf));
 };
