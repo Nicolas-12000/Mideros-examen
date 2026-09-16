@@ -9,3 +9,13 @@ body {
   height: 100%;
   overflow: hidden;
 }
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+body > * {
+  flex: 1;
+  min-height: 0;
+}

@@ -222,8 +222,9 @@ export default function Home() {
       }
       const wrap = cv.parentElement;
       if (wrap) {
-        const nw = Math.max(1, wrap.clientWidth);
-        const nh = Math.max(1, wrap.clientHeight);
+        const r = wrap.getBoundingClientRect();
+        const nw = Math.max(1, Math.floor(r.width));
+        const nh = Math.max(1, Math.floor(r.height));
         if (cv.width !== nw) cv.width = nw;
         if (cv.height !== nh) cv.height = nh;
       }
