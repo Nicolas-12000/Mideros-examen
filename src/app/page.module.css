@@ -1,0 +1,94 @@
+.page {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 12px;
+  padding: 12px;
+  background: #0c1118;
+  color: #d9e2ec;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.header h1 {
+  font-size: 1rem;
+  margin-right: auto;
+}
+
+.kpi {
+  font-size: 0.82rem;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #1a2533;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.controls label {
+  font-size: 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.controls button {
+  border: 1px solid #46607d;
+  border-radius: 8px;
+  background: #172435;
+  color: #d9e2ec;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.canvasWrap {
+  border: 1px solid #24384f;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #02060c;
+}
+
+.canvas {
+  width: 100%;
+  max-width: 100%;
+  display: block;
+}
+
+.events {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.event {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #39506b;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: #0e1b2c;
+  font-size: 0.8rem;
+}
+
+.table {
+  font-size: 0.78rem;
+  border-collapse: collapse;
+}
+
+.table td,
+.table th {
+  border: 1px solid #39506b;
+  padding: 4px 6px;
+}
